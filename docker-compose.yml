@@ -1,0 +1,46 @@
+# Dev-friendly compose file: brings up Postgres and the Phoenix app together.
+# Run with:  docker compose up
+# Visit:     http://localhost:4000
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: kanban_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_HOST: db
+      DATABASE_USER: postgres
+      DATABASE_PASSWORD: postgres
+      MIX_ENV: dev
+    ports:
+      - "4000:4000"
+    volumes:
+      # Bind-mount the source so code changes hot-reload inside the container.
+      - .:/app
+      # Anonymous volumes keep build artifacts inside the container so they
+      # don't clobber the host's _build/deps (which would slow start time).
+      - /app/_build
+      - /app/deps
+      - /app/assets/node_modules
+
+volumes:
+  db_data:
