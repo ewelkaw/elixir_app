@@ -1,0 +1,12 @@
+_build
+deps
+.git
+.gitignore
+*.md
+README.md
+test
+tmp
+priv/static/assets
+assets/node_modules
+.env
+.env.*

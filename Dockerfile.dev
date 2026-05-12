@@ -1,0 +1,22 @@
+# Dev-mode Dockerfile — keeps the source mounted for live reload.
+FROM hexpm/elixir:1.16.2-erlang-26.2.5-debian-bullseye-20240612
+
+ENV MIX_ENV=dev \
+    LANG=C.UTF-8
+
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends build-essential git inotify-tools && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+RUN mix local.hex --force && mix local.rebar --force
+
+COPY mix.exs mix.lock ./
+COPY config ./config
+RUN mix deps.get
+
+EXPOSE 4000
+
+# Wait for the DB, run migrations, then start Phoenix.
+CMD ["sh", "-c", "mix ecto.create && mix ecto.migrate && mix run priv/repo/seeds.exs && mix phx.server"]
