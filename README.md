@@ -157,6 +157,138 @@ mix setup           # deps.get + ecto.create + ecto.migrate + seeds + assets.bui
 mix phx.server      # http://localhost:4000
 ```
 
+## How the app works — diagrams
+
+### 1. Deployment view (what Docker brings up)
+
+```mermaid
+flowchart LR
+  browser["Browser tab\n(HTML + LiveView JS)"]
+  subgraph compose["docker compose"]
+    direction LR
+    app["app container\nDockerfile.dev\nPhoenix + BEAM VM\n:4000"]
+    db[("db container\nPostgres 16\n:5432\nvolume: db_data")]
+  end
+  browser -- "HTTPS\n+ WebSocket /live" --> app
+  app -- "SQL over TCP\n(via Ecto pool)" --> db
+```
+
+### 2. Supervision tree (what the BEAM starts inside the app container)
+
+`Kanban.Application.start/2` boots this tree. If any child crashes, only that
+child is restarted (`:one_for_one`). Think of it as systemd-for-processes,
+built into the runtime.
+
+```mermaid
+flowchart TD
+  sup["Kanban.Supervisor\nstrategy: :one_for_one"]
+  tele["KanbanWeb.Telemetry\n(metrics)"]
+  repo["Kanban.Repo\n(DB pool, 10 conns)"]
+  pubsub["Phoenix.PubSub\nname: Kanban.PubSub"]
+  endpoint["KanbanWeb.Endpoint\n(Bandit HTTP + WS)"]
+  lv1["BoardLive process\n(tab 1)"]
+  lv2["BoardLive process\n(tab 2)"]
+
+  sup --> tele
+  sup --> repo
+  sup --> pubsub
+  sup --> endpoint
+  endpoint -. "spawns one process\nper LiveView session" .-> lv1
+  endpoint -. "spawns one process\nper LiveView session" .-> lv2
+```
+
+### 3. Layered code map (where to look for what)
+
+```mermaid
+flowchart TB
+  subgraph web["Web layer · lib/kanban_web/"]
+    router["router.ex\nURL → LiveView"]
+    endpoint2["endpoint.ex\nPlug pipeline"]
+    layouts["components/layouts/*"]
+    core["components/core_components.ex"]
+    live["live/board_live.ex\n(mount, render,\nhandle_event, handle_info)"]
+  end
+
+  subgraph ctx["Business context · lib/kanban/"]
+    boards["boards.ex\n(public API)"]
+    card["boards/card.ex\nschema + changeset"]
+    repodb["repo.ex"]
+  end
+
+  subgraph infra["Infra"]
+    pg[("Postgres")]
+    bus(("Phoenix.PubSub"))
+  end
+
+  endpoint2 --> router --> live
+  layouts -.-> live
+  core -.-> live
+  live -- "Boards.create_card\nBoards.move_card\nBoards.delete_card" --> boards
+  boards -- "Card.changeset/2" --> card
+  boards -- "Repo.insert/update/delete" --> repodb
+  repodb --> pg
+  boards -- "broadcast" --> bus
+  bus -- "{:card_updated, card}" --> live
+```
+
+### 4. End-to-end: clicking "→ doing" on a card
+
+This is what happens when a user clicks the move button. Notice there is
+*no JavaScript you wrote* in this flow — LiveView ships the diff over
+WebSocket and patches the DOM.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User (tab A)
+  participant JS as LiveView JS client
+  participant LV as BoardLive (process for tab A)
+  participant B as Kanban.Boards
+  participant R as Kanban.Repo
+  participant DB as Postgres
+  participant PS as Phoenix.PubSub
+  participant LV2 as BoardLive (process for tab B)
+  participant U2 as User (tab B)
+
+  U->>JS: click "→ doing"
+  JS->>LV: phx-click {event: "move", id, status}
+  LV->>B: move_card(card, "doing")
+  B->>R: Repo.update(changeset)
+  R->>DB: UPDATE cards SET status='doing' …
+  DB-->>R: ok
+  R-->>B: {:ok, card}
+  B->>PS: broadcast("cards", {:card_updated, card})
+  B-->>LV: {:ok, card}
+  LV->>LV: load_cards/1 → reassign
+  LV-->>JS: HTML diff (only changed nodes)
+  JS-->>U: DOM patched
+  PS-->>LV2: {:card_updated, card}
+  LV2->>LV2: handle_info → load_cards/1
+  LV2-->>U2: DOM patched (no refresh!)
+```
+
+### 5. Request lifecycle through `Endpoint` plugs
+
+A regular HTTP request to `/` walks through this Plug pipeline before
+reaching the LiveView's `mount/3`. Each `plug` is conceptually one piece of
+Django/Flask middleware.
+
+```mermaid
+flowchart LR
+  req[HTTP request] --> static[Plug.Static]
+  static --> reqid[Plug.RequestId]
+  reqid --> tel[Plug.Telemetry]
+  tel --> parsers[Plug.Parsers\nJSON / form / multipart]
+  parsers --> mo[Plug.MethodOverride]
+  mo --> head[Plug.Head]
+  head --> sess[Plug.Session]
+  sess --> rt[KanbanWeb.Router]
+  rt --> pipe[":browser pipeline\nfetch_session\nfetch_live_flash\nput_root_layout\nprotect_from_forgery\nput_secure_browser_headers"]
+  pipe --> mount["BoardLive.mount/3"]
+  mount --> render["BoardLive.render/1\n→ HEEx → HTML"]
+  render --> resp[HTTP response]
+```
+
 ## Concept tour (Python ↔ Elixir)
 
 | Python idea                         | Elixir/Phoenix counterpart                  | Where to look |
